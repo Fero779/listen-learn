@@ -8,13 +8,19 @@ interface AudioPlayerProps {
   onComplete?: () => void;
 }
 
-const MOCK_DURATION = 72; // 72 seconds
+const SUMMARY_TEXT = `The 2026 Winter Olympics have officially begun in Milan, Italy. As of February 9th, 16 events have been completed, producing 48 medals across various disciplines. Norway leads the early medal tally, continuing their dominance in winter sports. Host nation Italy has impressed home crowds with strong performances in short track speed skating. The biathlon and cross-country skiing events have seen fierce Scandinavian competition. Figure skating's team event kicks off this week, while alpine skiing events are scheduled across the stunning slopes of Cortina d'Ampezzo. This is important for exams because the Milan-Cortina 2026 Games are a major international sporting event, and questions may focus on host cities, medal counts, and key participating nations.`;
+
+const ESTIMATED_DURATION = 45; // approximate seconds for the summary
 
 const AudioPlayer = ({ onPlayStateChange, onComplete }: AudioPlayerProps) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [duration, setDuration] = useState(ESTIMATED_DURATION);
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const elapsedBeforePauseRef = useRef<number>(0);
+  const animFrameRef = useRef<number>(0);
 
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
@@ -22,43 +28,110 @@ const AudioPlayer = ({ onPlayStateChange, onComplete }: AudioPlayerProps) => {
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
 
-  const togglePlay = useCallback(() => {
-    setIsPlaying((prev) => {
-      const next = !prev;
-      onPlayStateChange?.(next);
-      return next;
-    });
-  }, [onPlayStateChange]);
+  // Pick a calm, smooth voice
+  const getVoice = useCallback(() => {
+    const voices = window.speechSynthesis.getVoices();
+    // Prefer a soft female English voice
+    const preferred = voices.find(
+      (v) =>
+        v.lang.startsWith("en") &&
+        (v.name.includes("Samantha") ||
+          v.name.includes("Google UK English Female") ||
+          v.name.includes("Microsoft Zira") ||
+          v.name.includes("Karen") ||
+          v.name.includes("Moira") ||
+          v.name.includes("Fiona"))
+    );
+    return preferred || voices.find((v) => v.lang.startsWith("en")) || voices[0];
+  }, []);
 
-  useEffect(() => {
-    if (isPlaying) {
-      intervalRef.current = setInterval(() => {
-        setCurrentTime((prev) => {
-          const next = prev + 0.1;
-          if (next >= MOCK_DURATION) {
-            setIsPlaying(false);
-            onPlayStateChange?.(false);
-            onComplete?.();
-            if (intervalRef.current) clearInterval(intervalRef.current);
-            return MOCK_DURATION;
-          }
-          setProgress((next / MOCK_DURATION) * 100);
-          return next;
-        });
-      }, 100);
-    } else if (intervalRef.current) {
-      clearInterval(intervalRef.current);
+  const updateProgress = useCallback(() => {
+    if (!startTimeRef.current) return;
+    const elapsed = elapsedBeforePauseRef.current + (Date.now() - startTimeRef.current) / 1000;
+    setCurrentTime(elapsed);
+    setProgress(Math.min((elapsed / duration) * 100, 100));
+    animFrameRef.current = requestAnimationFrame(updateProgress);
+  }, [duration]);
+
+  const stopProgressTracking = useCallback(() => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = 0;
     }
+  }, []);
+
+  const handleEnd = useCallback(() => {
+    stopProgressTracking();
+    setIsPlaying(false);
+    setProgress(100);
+    setCurrentTime(duration);
+    elapsedBeforePauseRef.current = 0;
+    startTimeRef.current = 0;
+    onPlayStateChange?.(false);
+    onComplete?.();
+  }, [duration, onPlayStateChange, onComplete, stopProgressTracking]);
+
+  const speak = useCallback(() => {
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(SUMMARY_TEXT);
+    utterance.rate = 0.9; // slightly slower for calm feel
+    utterance.pitch = 1.0;
+    utterance.volume = 1;
+
+    const voice = getVoice();
+    if (voice) utterance.voice = voice;
+
+    utterance.onend = handleEnd;
+    utterance.onerror = handleEnd;
+
+    utteranceRef.current = utterance;
+    startTimeRef.current = Date.now();
+    window.speechSynthesis.speak(utterance);
+    animFrameRef.current = requestAnimationFrame(updateProgress);
+  }, [getVoice, handleEnd, updateProgress]);
+
+  const togglePlay = useCallback(() => {
+    if (isPlaying) {
+      // Pause
+      window.speechSynthesis.pause();
+      stopProgressTracking();
+      elapsedBeforePauseRef.current += (Date.now() - startTimeRef.current) / 1000;
+      startTimeRef.current = 0;
+      setIsPlaying(false);
+      onPlayStateChange?.(false);
+    } else {
+      // Play or resume
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+        startTimeRef.current = Date.now();
+        animFrameRef.current = requestAnimationFrame(updateProgress);
+      } else {
+        // Fresh start
+        elapsedBeforePauseRef.current = 0;
+        setProgress(0);
+        setCurrentTime(0);
+        speak();
+      }
+      setIsPlaying(true);
+      onPlayStateChange?.(true);
+    }
+  }, [isPlaying, onPlayStateChange, speak, stopProgressTracking, updateProgress]);
+
+  // Load voices
+  useEffect(() => {
+    const loadVoices = () => window.speechSynthesis.getVoices();
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      window.speechSynthesis.cancel();
+      stopProgressTracking();
     };
-  }, [isPlaying, onPlayStateChange, onComplete]);
+  }, [stopProgressTracking]);
 
   const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const pct = ((e.clientX - rect.left) / rect.width) * 100;
-    setProgress(pct);
-    setCurrentTime((pct / 100) * MOCK_DURATION);
+    // Progress click doesn't seek with SpeechSynthesis (not supported)
+    // Just visual feedback
   };
 
   return (
@@ -117,7 +190,7 @@ const AudioPlayer = ({ onPlayStateChange, onComplete }: AudioPlayerProps) => {
 
         {/* Time */}
         <span className="text-xs font-medium text-muted-foreground tabular-nums whitespace-nowrap">
-          {formatTime(currentTime)} / {formatTime(MOCK_DURATION)}
+          {formatTime(currentTime)} / {formatTime(duration)}
         </span>
       </div>
 
